@@ -1,0 +1,935 @@
+---
+title: "Machine Learning Approaches to Predicting Ramen Ratings"
+author: "Emily Koehler"
+date: "2025"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+
+## Introduction
+
+
+This project explores the use of machine learning algorithms to predict ramen ratings using a dataset that I found on Kaggle. This dataset contains over 2,500 ramen reviews sourced from the Ramen Rater, which is a popular website for ramen enthusiasts, or "ramenphiles", to review ramen varieties. The site has been live for over 15 years and has accumulated a comprehensive collection of reviews covering instant ramen from around the world, providing insights into different brands, styles and countries. The website not only rates these products but also offers tips and tricks for preparing the perfect ramen at home. 
+The goal of this project is to predict the quality or rating of ramen based on various features such as Variety, Country and Brand, offering a flavorful opportunity to dive into regression modeling.
+
+
+
+The objective is to forecast the star rating of a ramen product based on features like Brand, Variety, Style, and Country of Origin. Since the target variable (star rating) is continuous, this is framed as a regression problem.
+
+
+**Workflow Summary**
+
+
+The approach follows the CRISP-DM framework, commonly used in data mining and machine learning projects.
+
+
+
+**1. Understanding the Problem:** The goal here is to figure out if we can predict how well a ramen will be rated just by looking at things like the brand, flavor, and where it's from.
+
+
+**2. Data Exploration:** Explore the data for insights, inconsistencies, and anything worth noting.
+
+
+**3. Data Preparation:** Get the data cleaned and structured for analysis.
+
+
+**4. Modeling:** Use various models to estimate ramen ratings.
+
+
+**5. Evaluation:** Check how well the models performed and compare results.
+
+
+
+## Data Exploration 
+
+
+**Loading and Acquiring the Dataset** 
+
+To kick things off, I used a ramen ratings dataset sourced from a public URL. Since the data is live and occasionally updated with new reviews, I stored it in a local SQLite database to make querying and managing it more efficient.
+
+Instead of working directly with a CSV, I wrote the initial data into the database and then used SQL to retrieve it for further analysis in R.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Clear environment
+rm(list = ls())
+
+# Load libraries
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(ggplot2)
+
+# Define dataset URL
+url <- "https://drive.google.com/uc?export=download&id=16IuwftbTCiFEfqjzzErweRhOsn1bVPvq"
+
+# Read from URL
+raw_data <- read.csv(url)
+
+# Write to SQLite database
+con <- dbConnect(SQLite(), dbname = "ramen_ratings.db")
+dbWriteTable(con, "ramen_data", raw_data, overwrite = TRUE)
+
+# Read the data back using SQL
+ramen_data <- dbGetQuery(con, "SELECT * FROM ramen_data")
+dbDisconnect(con)
+
+# Explore dataset structure
+str(ramen_data)
+```
+
+The dataset contains over 2,500 reviews with variables like `Brand`, `Variety`, `Country`, `Style`, and `Stars` (the target variable). The `Top.Ten` column likely marks fan favorites, but a lot of values are missing. Ratings go from 1 to 5, and there’s a good variety of countries and brands represented, reflecting ramen’s global popularity.
+
+```{r, echo = FALSE}
+#display the first few rows of the dataframe
+head(ramen_data)
+```
+
+**Identification of Missing Values**
+
+After loading the data, I checked for missing values across all columns. At first glance, there didn’t appear to be any because `is.na()` returned all zeros. But visually scanning the data showed otherwise. The issue was that missing entries were represented as empty strings (`""`) rather than actual `NA` values.
+
+To fix this, I replaced all empty strings with `NA` so they could be properly recognized. After that, I calculated the percentage of missing values in each column to get a clearer picture of where data might be incomplete.
+
+```{r, echo = FALSE}
+#(for comparison) Calculate the percentage of missing values per column without replacing empty strings
+ramen_data_temp <- read.csv(url) #reload the original data to reset any changes
+missing_values_percentage_before <- round(sapply(ramen_data_temp, function(x) sum(is.na(x)) / length(x) * 100))
+
+#print the percentage of missing values per column before replacing empty strings
+print("Missing values percentage per column before replacing empty strings with NA:")
+print(missing_values_percentage_before)
+
+#replace empty strings with NA in all columns
+ramen_data[ramen_data == ""] <- NA
+
+#calculate the percentage of missing values per column
+print("Missing values percentage per column after replacing empty strings with NA:")
+missing_values_percentage <- round(sapply(ramen_data, function(x) sum(is.na(x)) / length(x) * 100))
+missing_values_percentage
+```
+
+
+The output showed that the `Top.Ten` column was over 98% empty, making it pretty useless for this analysis. Since it didn’t offer much value and could introduce noise, I decided to drop it.
+
+To be safe, I kept a copy of the original dataset and created a new version without the Top.Ten column. This gave me a cleaner dataset with no missing values.
+
+```{r, echo = FALSE}
+#make a copy of the original dataset
+ramen_data_original <- ramen_data
+
+#create a new dataset with the Top.Ten column removed
+ramen_data_no_topten <- ramen_data[ , !(names(ramen_data) %in% c("Top.Ten"))]
+```
+
+
+Before moving forward, I checked the data types for each column to better understand how to handle them during analysis.
+
+
+```{r, echo = FALSE}
+#check columns for type
+column_types <- sapply(ramen_data_no_topten, class)
+column_types
+```
+
+
+Since the `Stars` column was stored as a character, I converted it to numeric. This step was necessary because `Stars` represents ramen ratings, which are numerical values and need to be treated that way for modeling.
+
+
+```{r, echo = FALSE}
+#ensure 'Stars' column is numeric
+ramen_data_no_topten$Stars <- as.numeric(as.character(ramen_data_no_topten$Stars))
+
+#check for NA values introduced from conversion
+missing_count <- sum(is.na(ramen_data_no_topten$Stars))
+missing_count
+```
+
+
+When converting the Stars column to numeric, a warning popped up showing that a few values couldn’t be properly converted. This likely happened because of some unusual or non-numeric entries in the original dataset. Since it only affected three rows out of 2,580, I removed them to keep the data clean without impacting the overall analysis.
+
+
+```{r, echo = FALSE}
+#remove rows with NA in 'Stars' or handle them as needed
+ramen_data_no_topten <- ramen_data_no_topten[!is.na(ramen_data_no_topten$Stars), ]
+```
+
+
+## Data Preparation
+
+
+**Evaluation of Distribution**
+
+
+The next step was to check the distribution of continuous features. In this dataset, the only continuous variable is Stars, which represents the ramen ratings. Checking for normality is useful because many machine learning models assume the data is normally distributed. A roughly normal distribution can help improve prediction accuracy and reliability.
+
+
+```{r, echo = FALSE}
+#check continous variables (target variable in this case) for normality
+normality_stars <- hist(ramen_data_no_topten$Stars, col = "pink", main = "Histogram of Stars Column", xlab = "Stars", ylab = "Frequency")
+```
+
+The histogram showed that the Stars ratings are not normally distributed and are skewed, with a heavier concentration of ratings around 3 to 4 stars.
+
+
+
+To confirm this, I also ran a Shapiro-Wilk test, which formally tests whether a sample comes from a normal distribution. The test provides a p-value to help decide whether the assumption of normality holds. 
+
+
+```{r, echo = FALSE}
+shapiro_test_result <- shapiro.test(ramen_data_no_topten$Stars)
+shapiro_test_result
+```
+The Shapiro-Wilk test returned a very small p-value (less than 2.2e-16), which strongly rejects the null hypothesis that the data is normally distributed. This confirmed that the Stars column does not follow a normal distribution.
+
+
+
+To visualize this further, I created a QQ plot. In a QQ plot, if the data points fall along the 45-degree reference line, it suggests the data is normally distributed. Significant deviations from the line indicate departures from normality.
+
+
+```{r, echo = FALSE, warning = FALSE}
+#QQ plot for the 'Stars' column
+qqplot <- ggplot(data = ramen_data_no_topten, aes(sample = Stars)) +
+  stat_qq() +
+  stat_qq_line() +
+  ggtitle("Q-Q Plot of Stars Column") 
+
+#print QQ plot
+print(qqplot)
+```
+
+Although the histogram, Shapiro-Wilk test, and QQ plot all confirmed that the Stars column isn't normally distributed, I decided to see if applying a transformation could help.
+
+To explore this, I created a function that applies and compares three common transformations: log, square root, and inverse, alongside the original distribution. This makes it easier to visually assess whether any of the transformations bring the data closer to normality.
+
+```{r, echo = FALSE}
+#function to plot histogram of given column
+plot_histograms <- function(data, col_name) {
+  par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+  
+  #original data histogram
+  hist(data[[col_name]], main = paste("Original", col_name), 
+       xlab = col_name, col = "pink", border = "black")
+  
+  #log transformation histogram
+  hist(log(data[[col_name]] + 1), main = paste("Log-transformed", col_name), 
+       xlab = paste("log(", col_name, "+1)", sep=""), col = "blue", border = "black")
+  
+  #square root transformation histogram
+  hist(sqrt(data[[col_name]]), main = paste("Sqrt-transformed", col_name), 
+       xlab = paste("sqrt(", col_name, ")", sep=""), col = "green", border = "black")
+  
+  #inverse transformation histogram
+  hist(1 / (data[[col_name]] + 1), main = paste("Inverse-transformed", col_name), 
+       xlab = paste("1/(", col_name, "+1)", sep=""), col = "purple", border = "black")
+}
+
+#plot 'Stars' column transformations
+plot_histograms(ramen_data_no_topten, "Stars")
+```
+
+None of the transformations noticeably improved the distribution of the Stars column. I decided to move forward without applying any transformation.
+The original `Stars` data is skewed to the right, meaning there are more high ratings than low ones. While I continued without adjusting the distribution, it is important to keep this skewness in mind, especially when using models that assume normality. Skewed data can impact both model performance and how easily the results can be interpreted.
+
+
+**Detection of Outliers**
+
+
+Next, I checked for outliers in the Stars column. Outliers are data points that differ significantly from the rest of the data and can sometimes skew results or lead to misleading conclusions.
+
+
+To spot outliers, I made a boxplot. It shows the median (the line inside the box), the spread of most of the data (the box itself, which covers the middle 50%), and the "whiskers" that reach out to the more typical minimum and maximum values. Any points outside the whiskers are considered outliers and show up as individual dots.
+
+
+```{r, echo = FALSE}
+#check for outliers in 'Stars' column
+boxplot(ramen_data_no_topten$Stars,
+        main = "Boxplot of Ramen Ratings 'Stars' Column",
+        ylab = "Stars",
+        col = "pink")
+```
+
+The boxplot clearly shows several outliers in the `Stars` column. Rather than removing them, I chose to handle the outliers by capping them at threshold values. This approach helps limit the influence of extreme ratings without distorting the overall distribution of the data.
+
+
+
+To handle the outliers in the Stars column, I calculated the first quartile (Q1), third quartile (Q3), and the interquartile range (IQR). Using these, I set thresholds for what counts as an outlier. The lower bound was defined as Q1 minus 1.5 times the IQR, and the upper bound was Q3 plus 1.5 times the IQR. Any Stars value below the lower bound was replaced with the lower bound, and any value above the upper bound was capped at the upper bound.
+
+
+```{r, echo = FALSE}
+#calculate the Q1, Q3, and IQR
+Q1 <- quantile(ramen_data_no_topten$Stars, 0.25, na.rm = TRUE)
+Q3 <- quantile(ramen_data_no_topten$Stars, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1
+
+#calculate the lower and upper bounds for outliers
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+#impute outliers in 'Stars' column
+ramen_data_no_topten$Stars[ramen_data_no_topten$Stars < lower_bound] <- lower_bound
+ramen_data_no_topten$Stars[ramen_data_no_topten$Stars > upper_bound] <- upper_bound
+
+#check the boxplot after imputation
+boxplot(ramen_data_no_topten$Stars,
+        main = "Boxplot of 'Stars' Column After Imputation",
+        ylab = "Stars",
+        col = "lightblue")
+```
+
+After capping the outliers, the updated boxplot shows a much cleaner distribution with no extreme values beyond the whiskers. This keeps the dataset balanced while minimizing the impact of unusually high or low ratings.
+
+
+**Correlation Evaluation**
+
+Next, I checked how the categorical features relate to the target variable, Stars. Since most of the features are categorical, I used ANOVA (Analysis of Variance) to test whether there are statistically significant differences in Stars ratings across different groups. ANOVA is helpful for comparing the means of three or more groups and shows whether a categorical variable has a meaningful impact on a continuous outcome.
+
+
+I performed separate ANOVA tests for each categorical feature: Brand, Variety, Style, and Country to see if they significantly affect the Stars ratings.
+
+```{r, echo = FALSE}
+#ANOVA for Stars by Brand
+anova_brand <- aov(Stars ~ Brand, data = ramen_data_no_topten)
+summary(anova_brand)
+```
+```{r, echo = FALSE}
+#ANOVA for Stars by Variety
+anova_variety <- aov(Stars ~ Variety, data = ramen_data_no_topten)
+summary(anova_variety)
+```
+```{r, echo = FALSE}
+#ANOVA for Stars by Style
+anova_style <- aov(Stars ~ Style, data = ramen_data_no_topten)
+summary(anova_style)
+```
+```{r, echo = FALSE}
+#ANOVA for Stars by Country
+anova_country <- aov(Stars ~ Country, data = ramen_data_no_topten)
+summary(anova_country)
+```
+The ANOVA results showed statistically significant differences in `Stars` ratings across all of the categorical variables tested. For `Brand`, the F-statistic was 3.91 with a p-value less than 2e-16, indicating strong differences between brands. `Variety` had an F-statistic of 2.00 and a p-value of 1.55e-08, suggesting differences across different types of ramen. For `Style`, the F-statistic was 3.63 with a p-value of 0.00136, highlighting differences between styles such as cups or packs. Lastly, `Country` had the strongest effect, with an F-statistic of 10.9 and a p-value less than 2e-16, showing clear differences across countries.
+
+Overall, these results demonstrate that `Brand`, `Variety`, `Style`, and `Country` all significantly influence Stars ratings, and they should be treated as important factors when building models or interpreting predictions.
+
+
+**Binning of Categorical Variables**
+
+After imputing the mode, I proceeded to bin low frequency values in the `Brand`, `Country` and `Variety` columns. Binning low-frequency categories is beneficial because it helps to reduce the complexity of the dataset by grouping less common values into a single category. This is particularly useful in situations where there are many unique categories with few occurrences, which can complicate analysis and model training. By defining a threshold for low frequency values, I ensure that the dataset remains manageable and that categories with insufficient data do not skew the results or cause issues during the split into training and validation datasets.
+
+For the `Brand` column, a threshold of 10 was used, meaning brands with fewer than 10 occurrences were grouped into an 'Other' category. Similarly, for the `Variety` and `Country` columns, a threshold of 5 was applied, grouping varieties and countries with fewer than 5 occurrences into an 'Other' category. While this process may result in a loss of some data detail, it helps maintain the integrity of the analysis and ensures consistency between the training and validation datasets that will be created. This way, the model can focus on learning from significant patterns rather than being influenced by sparse and potentially noisy data points.
+```{r, echo = FALSE}
+# Binning low-frequency categories
+binning_low_frequency <- function(data) {
+  # Binning Brands
+  brand_threshold <- 10
+  brand_counts <- table(data$Brand)
+  other_brands <- names(brand_counts[brand_counts < brand_threshold])
+  data$Brand <- as.character(data$Brand)
+  data$Brand[data$Brand %in% other_brands] <- "Other"
+  data$Brand <- as.factor(data$Brand)
+  
+  # Binning Varieties
+  variety_threshold <- 5
+  variety_counts <- table(data$Variety)
+  other_varieties <- names(variety_counts[variety_counts < variety_threshold])
+  data$Variety <- as.character(data$Variety)
+  data$Variety[data$Variety %in% other_varieties] <- "Other"
+  data$Variety <- as.factor(data$Variety)
+  
+  # Binning Countries
+  country_threshold <- 5
+  country_counts <- table(data$Country)
+  other_countries <- names(country_counts[country_counts < country_threshold])
+  data$Country <- as.character(data$Country)
+  data$Country[data$Country %in% other_countries] <- "Other"
+  data$Country <- as.factor(data$Country)
+  
+  return(data)
+}
+
+# Apply binning to the cleaned dataset
+ramen_data_no_topten <- binning_low_frequency(ramen_data_no_topten)
+
+# Print out the number of "Other" entries created after binning
+cat("Number of 'Other' entries after binning:\n")
+cat("Brand -", sum(ramen_data_no_topten$Brand == "Other"), "\n")
+cat("Variety -", sum(ramen_data_no_topten$Variety == "Other"), "\n")
+cat("Country -", sum(ramen_data_no_topten$Country == "Other"), "\n")
+```
+
+
+
+
+```{r, echo = FALSE}
+# Calculate and print percentage of "Other" entries for each categorical variable
+cat("Percentage of 'Other' entries after binning:\n")
+
+brand_other_pct <- round(mean(ramen_data_no_topten$Brand == "Other") * 100, 2)
+cat("Brand -", brand_other_pct, "%\n")
+
+variety_other_pct <- round(mean(ramen_data_no_topten$Variety == "Other") * 100, 2)
+cat("Variety -", variety_other_pct, "%\n")
+
+country_other_pct <- round(mean(ramen_data_no_topten$Country == "Other") * 100, 2)
+cat("Country -", country_other_pct, "%\n")
+```
+
+The results of the binning process show that a significant portion of the dataset now falls under the "Other" category, especially for the `Variety` column. Nearly 99% of all varieties were grouped into "Other", indicating that most types appear too infrequently to be useful on their own. This heavy binning significantly reduces the granularity of the Variety feature and limits its value as a predictor.
+
+
+While `Variety` was statistically significant in the initial ANOVA test, the overwhelming dominance of the "Other" category left the feature with very little variation. Because of this, I chose to exclude `Variety` from further modeling, as it no longer contributes meaningful information.
+
+
+In contrast, `Brand` and `Country` retained more detailed category distributions, with only about 32% and 1% of their values binned, respectively. These variables are likely to provide more reliable signal and will be included in the modeling process.
+
+```{r, echo = FALSE}
+# Remove the 'Variety' column after binning due to high percentage of 'Other'
+ramen_data_no_topten <- ramen_data_no_topten %>% select(-Variety)
+```
+
+
+**Encoding**
+
+After binning the dataset, I moved on to encoding the categorical features. I chose to use frequency encoding instead of one-hot encoding to avoid blowing up the number of features. Frequency encoding made more sense here because it turns each category into a numerical value based on how often it appears, which helps keep the dataset simple and avoids creating hundreds of new columns like one-hot encoding would.
+
+
+I applied frequency encoding to the remaining categorical features (`Brand`, `Style`, and `Country`).
+Since Variety was dropped earlier due to heavy binning, it was no longer part of this step.
+
+
+After frequency encoding, I applied Min-Max normalization to scale the features between 0 and 1. Normalizing the features helps ensure that no single variable dominates the model just because it has larger numeric values. This is especially important here because the frequency-encoded features and the Stars ratings are on very different scales. Bringing everything onto a common scale improves model performance and stability
+
+
+**Feature Engineering**
+
+
+Next, I created a few new features to help the model capture more complex relationships in the data.
+First, I added an interaction term between Brand and Country, since the impact of a brand's popularity might depend on the country it is sold in. For example, a brand that is highly rated in Japan might not be as well received in the USA. Capturing this combined effect could help the model better predict Stars ratings based on local brand performance.
+
+Then, I generated polynomial features by squaring and cubing the Stars ratings. These additional terms help the model pick up on any non-linear trends in how ratings behave. For instance, it may be that low- and high-rated ramen products behave differently from mid-range ones, and simple linear models might miss that without polynomial terms.
+
+
+```{r, echo = FALSE}
+# Frequency encoding function
+frequency_encoding <- function(df, feature) {
+  freq_table <- df %>%
+    group_by_at(feature) %>%
+    summarize(Frequency = n()) %>%
+    ungroup()
+  
+  df <- df %>%
+    left_join(freq_table, by = feature) %>%
+    mutate(!!feature := Frequency) %>%
+    select(-Frequency)
+  
+  return(df)
+}
+
+# Apply frequency encoding to categorical features
+ramen_data_encoded <- ramen_data_no_topten
+ramen_data_encoded <- frequency_encoding(ramen_data_encoded, "Brand")
+ramen_data_encoded <- frequency_encoding(ramen_data_encoded, "Style")
+ramen_data_encoded <- frequency_encoding(ramen_data_encoded, "Country")
+# Note: No frequency encoding for Variety anymore, because Variety was dropped
+
+# Feature engineering: Create new derived features
+ramen_data_encoded <- ramen_data_encoded %>%
+  mutate(Brand_Country_Interaction = as.numeric(Brand) * as.numeric(Country),
+         Stars_Squared = Stars^2,
+         Stars_Cubed = Stars^3)
+
+# Min-Max normalization function
+min_max_scaling <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+# Apply Min-Max normalization, ignoring the first column (ID)
+ramen_data_scaled <- ramen_data_encoded %>%
+  mutate(across(-1, min_max_scaling)) # Min-max scaling to all columns except ID
+```
+
+
+
+
+**Principal Component Analysis**
+
+
+Principal Component Analysis (PCA) is a technique used to reduce the dimensionality of a dataset while retaining as much variance as possible. It works by transforming the original features into a new set of uncorrelated variables called principal components. These components are ordered by how much variance they capture, with the first few components explaining the majority of the variability in the data.
+
+
+Although the ramen dataset is relatively small, with around 2,500 rows and a limited number of features, applying PCA can still help simplify the data, improve model efficiency, and make underlying patterns easier to interpret.
+
+
+I applied PCA to the scaled dataset using the `prcomp()` function, with centering and scaling enabled to make sure each feature contributed equally. After running PCA, I summarized the results to see how much variance was explained by each principal component. I also plotted the cumulative variance to visualize how many components were needed to retain most of the information.
+
+
+Based on the cumulative variance plot, I selected the number of principal components needed to capture at least 95% of the total variance. The dataset was then transformed using these selected components, creating a new dataframe, which contains the principal components along with the original `Stars` ratings for supervised learning.
+
+```{r, echo = FALSE}
+# Apply PCA to the scaled data
+pca <- prcomp(ramen_data_scaled, center = TRUE, scale. = TRUE)
+
+# Summary of PCA
+summary(pca)
+
+# Plot the cumulative variance explained
+plot(cumsum(pca$sdev^2 / sum(pca$sdev^2)), type = 'b',
+     xlab = 'Principal Components', ylab = 'Cumulative Proportion of Variance Explained')
+
+# Determine the number of components to retain (e.g., components that explain 95% of variance)
+num_components <- which(cumsum(pca$sdev^2 / sum(pca$sdev^2)) >= 0.95)[1]
+num_components
+
+# Transform the dataset using the selected principal components
+ramen_data_pca <- data.frame(pca$x[, 1:num_components])
+colnames(ramen_data_pca) <- paste0("PC", 1:num_components)
+ramen_data_pca$Stars <- ramen_data_encoded$Stars
+```
+The summary table above shows the standard deviation, proportion of variance explained, and cumulative variance for each component. For example, the first principal component (PC1) explains about 21.68% of the total variance, and the second component (PC2) explains around 20.09%.
+
+
+The cumulative variance plot shows how much total variance is captured as more components are added. As expected, the cumulative variance increases steadily toward 100 percent. Based on the plot, the first five principal components are enough to explain at least 95 percent of the total variance. This dimensionality reduction keeps the important information from the dataset while making it more compact, which should help improve the efficiency and performance of later modeling steps.
+
+
+
+
+**Splitting Data**
+
+
+Once the dataset was fully preprocessed and transformed using PCA, I split it into training and validation sets to prepare for modeling. This step is important in machine learning because it allows models to be trained on one portion of the data and tested on another, helping to evaluate how well the model performs on unseen data.
+
+
+I used an 80/20 split, where 80 percent of the data is used for training and the remaining 20 percent is used for validation. A random seed was set to ensure that the split is reproducible and that the data is randomly distributed between the two sets. With this, the dataset is ready for model training and evaluation.
+
+```{r, echo = FALSE}
+# Split PCA-transformed data into training and validation sets (80/20 split)
+set.seed(1234)  # Set seed for reproducibility
+sample_size <- floor(0.8 * nrow(ramen_data_pca))  # Calculate sample size for training set
+train_indices <- sample(seq_len(nrow(ramen_data_pca)), size = sample_size)  # Randomly select training indices
+
+# Create training and validation datasets
+train_data_pca <- ramen_data_pca[train_indices, ]
+validation_data_pca <- ramen_data_pca[-train_indices, ]
+```
+
+
+
+
+## kNN Algorithm
+
+
+
+The k-Nearest Neighbors (kNN) algorithm is a simple yet effective method for regression and classification tasks. It works by identifying the 'k' closest data points to a new input and making predictions based on their values. For regression problems like this one, it takes the average of the neighbors’ outcomes. Because kNN is non-parametric, it doesn’t assume a particular distribution of the data, which makes it useful for datasets with mixed types and non-normal distributions—like the ramen ratings data.
+
+
+After preprocessing and applying PCA, I trained a kNN regression model using the `caret` package. I used 5-fold cross-validation through the `trainControl()` function to ensure the model was evaluated on different subsets of the data. This approach helps reduce the risk of overfitting and gives a more robust estimate of model performance.
+
+
+The `train()` function was used to train the model on the PCA-transformed training data, tuning across 10 different values of 'k' to find the best fit. After training, I generated predictions on the validation set and evaluated the model using Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and R-squared. These metrics give a clear picture of how well the model performed, both in terms of prediction error and how much variance in the ratings it was able to explain.
+
+
+
+```{r, message = FALSE, echo = FALSE}
+# Train kNN model using caret on PCA-transformed training data
+library(caret)
+
+knn_control <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+knn_model_pca <- train(Stars ~ ., data = train_data_pca, method = "knn",
+                       trControl = knn_control, tuneLength = 10)
+
+# Predict on validation set
+predictions_knn_pca <- predict(knn_model_pca, newdata = validation_data_pca)
+actual_values_pca <- validation_data_pca$Stars
+
+# Calculate MSE, RMSE, and R-squared
+mse_knn_pca <- mean((predictions_knn_pca - actual_values_pca)^2)
+rmse_knn_pca <- sqrt(mse_knn_pca)
+sst_knn_pca <- sum((actual_values_pca - mean(actual_values_pca))^2)
+sse_knn_pca <- sum((predictions_knn_pca - actual_values_pca)^2)
+r_squared_knn_pca <- 1 - sse_knn_pca / sst_knn_pca
+
+# Print as a list
+print(list(
+  kNN_PCA_Model = list(
+    MSE = mse_knn_pca,
+    RMSE = rmse_knn_pca,
+    R_squared = r_squared_knn_pca
+  )
+))
+```
+**Model Performance Summary**
+
+The kNN model performed very well on the validation set. The Mean Squared Error (MSE) was approximately 0.0074, which represents the average of the squared differences between the actual and predicted ratings. A lower MSE indicates that the model’s predictions are, on average, very close to the true values. The Root Mean Squared Error (RMSE) was about 0.086, which expresses the error in the same units as the target variable (`Stars`). 
+
+
+
+The model’s R-squared value was 0.99, meaning it was able to explain over 99 percent of the variability in the ramen ratings. This suggests a very strong fit between the predicted and actual values. Altogether, these evaluation metrics confirm that the kNN algorithm, when combined with PCA for dimensionality reduction, was highly effective in modeling this regression problem with both low prediction error and strong explanatory power.
+
+
+**Conclusion and Final Thoughts on kNN Applicability**
+
+
+Using the kNN algorithm on the ramen ratings dataset proved to be a strong choice for this regression task. After transforming the data with PCA, the model achieved high predictive accuracy, as shown by the low MSE and RMSE values and a very high R-squared score. kNN worked especially well here because it doesn’t rely on any assumptions about the data distribution and instead makes predictions based on how similar data points are to one another.
+
+
+
+That said, there are still a few considerations. While kNN is intuitive and effective, it can become computationally expensive as datasets grow larger, since it calculates distances between all points during prediction. Its performance can also be sensitive to how the data is scaled and structured. Future work could explore other regression models, such as Random Forests or Gradient Boosting, which might offer better scalability and potentially improved performance. Additionally, alternative dimensionality reduction techniques or feature selection methods could be tested to streamline the process further.
+
+
+## Random Forest Algorithm
+
+
+Random Forest is an ensemble learning method that builds multiple decision trees and combines their predictions to improve accuracy and reduce overfitting. It works well for both classification and regression tasks and can capture complex interactions between features. Because it’s non-parametric, Random Forest does not rely on any assumptions about data distribution, making it a flexible and reliable choice for this dataset.
+
+
+Using the same PCA-transformed training set as in the kNN model, I trained a Random Forest regression model and evaluated its performance using 5-fold cross-validation. As before, I assessed the model using Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and R-squared to measure its accuracy and how well it explains the variance in the ratings.
+
+
+```{r, warning = FALSE, echo = FALSE, message = FALSE}
+# Load randomForest package
+library(randomForest)
+
+# Train Random Forest using caret on PCA-transformed training set
+rf_control <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+rf_model_pca <- train(Stars ~ ., data = train_data_pca, method = "rf",
+                      trControl = rf_control)
+
+# Predict on the validation set
+predictions_rf_pca <- predict(rf_model_pca, newdata = validation_data_pca)
+actual_values_pca <- validation_data_pca$Stars
+
+# Calculate MSE, RMSE, and R-squared
+mse_rf_pca <- mean((predictions_rf_pca - actual_values_pca)^2)
+rmse_rf_pca <- sqrt(mse_rf_pca)
+
+sst_rf_pca <- sum((actual_values_pca - mean(actual_values_pca))^2)
+sse_rf_pca <- sum((predictions_rf_pca - actual_values_pca)^2)
+r_squared_rf_pca <- 1 - sse_rf_pca / sst_rf_pca
+
+# Optional: nicely structured output
+print(list(
+  Random_Forest_PCA_Model = list(
+    MSE = mse_rf_pca,
+    RMSE = rmse_rf_pca,
+    R_squared = r_squared_rf_pca
+  )
+))
+```
+**Model Performance Summary**
+
+
+The Random Forest model delivered excellent results on the validation set. The Mean Squared Error (MSE) was approximately 0.0011, and the Root Mean Squared Error (RMSE) was just 0.033, indicating extremely low prediction error. The R-squared value was 0.9986, meaning the model explained over 99.8% of the variance in the ramen ratings.
+
+
+
+These metrics suggest that Random Forest, combined with PCA, was highly effective at capturing the patterns in the data and making accurate predictions. Its ability to handle complex feature interactions and remain robust to noise makes it a strong choice for this task. Compared to the already strong performance of the kNN model, Random Forest showed even greater precision with lower error and higher explanatory power.
+
+
+
+**Conclusion and Final Thoughts on Random Forest Applicability**
+
+
+The Random Forest model proved to be highly effective for predicting ramen ratings. After applying PCA and training the Random Forest regressor, the model achieved excellent predictive accuracy, reflected in the very low MSE and RMSE values and a high R-squared value. Random Forest was particularly well-suited for this dataset because of its ability to handle complex feature interactions, support both categorical and continuous variables, and model non-linear relationships without requiring strict assumptions about the underlying data. Overall, Random Forest offered a flexible, powerful, and accurate solution for this regression task.
+
+
+## Lasso Regression
+
+
+Lasso Regression is a type of linear regression that adds a penalty to the model to help keep things simple. It works by shrinking some of the feature coefficients down to zero, which basically means it can ignore features that aren’t very useful. This makes the model less complex, helps avoid overfitting, and can even act as a built-in feature selector.
+
+
+Lasso is especially helpful when working with datasets that may contain irrelevant or redundant features. It also handles multicollinearity better than standard linear regression by limiting the influence of less informative predictors. However, its assumptions—such as linear relationships and homoscedasticity—must still be considered. While it's a powerful method, it may not perform well if important relationships are highly nonlinear, and it requires tuning of the regularization parameter.
+
+
+To evaluate its performance, I used the same preprocessed and PCA-transformed training and validation datasets as in the kNN and Random Forest models. I trained the Lasso model using the `caret` package and 5-fold cross-validation, and evaluated it using MSE, RMSE, and R-squared.
+
+
+```{r, echo = FALSE, message = FALSE}
+# Load required package
+library(glmnet)
+
+# Train Lasso Regression model using caret
+lasso_control <- trainControl(method = "cv", number = 5)
+lasso_model <- train(
+  Stars ~ ., 
+  data = train_data_pca,
+  method = "glmnet",
+  trControl = lasso_control,
+  tuneLength = 10
+)
+
+# Predict on the validation set
+predictions_lasso <- predict(lasso_model, newdata = validation_data_pca)
+actual_values_lasso <- validation_data_pca$Stars
+
+# Evaluate performance
+mse_lasso <- mean((predictions_lasso - actual_values_lasso)^2)
+rmse_lasso <- sqrt(mse_lasso)
+sst_lasso <- sum((actual_values_lasso - mean(actual_values_lasso))^2)
+sse_lasso <- sum((predictions_lasso - actual_values_lasso)^2)
+r_squared_lasso <- 1 - sse_lasso / sst_lasso
+
+# Print results
+print(list(
+  Lasso_Regression = list(
+    MSE = mse_lasso,
+    RMSE = rmse_lasso,
+    R_squared = r_squared_lasso
+  )
+))
+```
+
+**Model Performance Summary**
+
+
+The Lasso Regression results show that the model performed well on the validation set. The MSE was approximately 0.018, and the RMSE was about 0.135, indicating relatively low prediction errors. The R-squared value was around 0.978, meaning the model was able to explain nearly 98% of the variance in the ramen ratings. Overall, these results suggest that Lasso Regression is an effective method for this regression task
+
+
+**Conclusion and Final Thoughts on Lasso Regression Applicability**
+
+
+Applying Lasso Regression to the ramen ratings dataset turned out to be a strong and effective choice for this regression problem. Lasso was especially useful because it not only built an accurate predictive model but also simplified the dataset by automatically selecting the most important features.
+
+
+One limitation to keep in mind is that Lasso assumes linear relationships between predictors and the target variable. If the true relationships are more complex or non-linear, other models might perform even better. Exploring non-linear models could be a good next step for further improving predictive performance.
+
+
+In the end, Lasso Regression provided a great balance between simplicity and accuracy, making it a highly effective approach for predicting ramen ratings in this project.
+
+
+
+## Ensemble Algorithm
+
+
+To bring together the strengths of the individual models (kNN, Random Forest, and Lasso Regression), I created an ensemble model. The idea behind an ensemble is to combine predictions from multiple models to produce a more accurate and stable result. This approach helps balance out individual weaknesses of each model and is often more effective than relying on any single model alone.
+
+
+Instead of rewriting the entire preprocessing pipeline, I reused the existing PCA-transformed training and validation datasets. I then trained and evaluated each model (kNN, RF, Lasso) using 5-fold cross-validation and captured their predictions on the validation set.
+
+
+The ensemble model calculates the average of predictions from all three models to generate final predictions. I then evaluated the ensemble using standard regression metrics: MSE, RMSE, and R-squared.
+
+
+```{r, echo = FALSE}
+# Train and predict helper function
+train_and_predict <- function(train_data, validation_data, method) {
+  model <- train(Stars ~ ., data = train_data, method = method, trControl = trainControl(method = "cv", number = 5))
+  predictions <- predict(model, newdata = validation_data)
+  return(predictions)
+}
+
+# Generate predictions from each model
+pred_knn <- train_and_predict(train_data_pca, validation_data_pca, "knn")
+pred_rf <- train_and_predict(train_data_pca, validation_data_pca, "rf")
+pred_lasso <- train_and_predict(train_data_pca, validation_data_pca, "glmnet")
+
+# Ensemble prediction by averaging
+ensemble_preds <- (pred_knn + pred_rf + pred_lasso) / 3
+
+# Actual values
+actual <- validation_data_pca$Stars
+
+# Evaluation metrics
+mse_ensemble <- mean((ensemble_preds - actual)^2)
+rmse_ensemble <- sqrt(mse_ensemble)
+r_squared_ensemble <- 1 - sum((ensemble_preds - actual)^2) / sum((actual - mean(actual))^2)
+
+# Print results
+print(list(
+  Ensemble_Model = list(
+    MSE = mse_ensemble,
+    RMSE = rmse_ensemble,
+    R_squared = r_squared_ensemble
+  )
+))
+```
+
+After evaluating each individual model, I compared their performance using standard regression metrics:
+
+
+- **kNN** had an RMSE of 0.086 and R-squared of 0.99, showing strong performance with relatively low prediction error.
+
+- **Random Forest** outperformed the other models with an RMSE of 0.033 and an R-squared of 0.9986, indicating excellent predictive accuracy.
+
+- **Lasso Regression** performed well but was slightly less accurate, with an RMSE of 0.135 and R-squared of 0.9776.
+
+
+
+To further improve predictive performance, I built an ensemble model that averages the predictions from all three algorithms. This approach helps smooth out individual model errors and can yield a more reliable prediction.
+
+
+The final ensemble model achieved an RMSE of 0.0598 and an R-squared of 0.9956, striking a balance between the models. This confirms that combining multiple algorithms can enhance prediction accuracy and robustness compared to using any one model alone.
+
+**Boosting**
+
+To build on the success of the ensemble model, I also tested a Boosting algorithm using Stochastic Gradient Boosting (GBM). Boosting is a powerful ensemble technique that builds models sequentially, where each new model attempts to correct the errors made by the previous ones. This leads to a strong final model that focuses on difficult-to-predict observations, often resulting in improved accuracy. I trained the GBM model on the same PCA-transformed training data using 5-fold cross-validation to ensure robustness. 
+
+```{r, echo = FALSE}
+#define function to train and evaluate a boosting model
+train_and_evaluate_boosting <- function(train_data, validation_data, target_column, method = "gbm", control = trainControl(method = "cv", number = 5)) {
+  
+  #train the boosting model
+  boosting_model <- train(as.formula(paste(target_column, "~ .")), # create formula for the model
+                          data = train_data,                      # specify the training data
+                          method = method,                        # specify the method (default is "gbm")
+                          trControl = control,                    # specify the training control parameters
+                          verbose = FALSE)                        # suppress verbose output
+  
+  #predict on the validation set
+  boosting_predictions <- predict(boosting_model, newdata = validation_data) # generate predictions for the validation set
+  
+  #calculate performance metrics
+  mse <- mean((boosting_predictions - validation_data[[target_column]])^2) # calculate mean squared error
+  rmse <- sqrt(mse)                                                        # calculate root mean squared error
+  r_squared <- 1 - sum((boosting_predictions - validation_data[[target_column]])^2) / 
+                      sum((validation_data[[target_column]] - mean(validation_data[[target_column]]))^2) # calculate R-squared
+  
+  #return the model and performance metrics
+  list(model = boosting_model, MSE = mse, RMSE = rmse, R_squared = r_squared) # return the trained model and performance metrics
+}
+
+#example usage of the function
+#define the training control
+train_control <- trainControl(method = "cv", number = 5) # set up 5-fold cross-validation
+
+#call the function with the prepared data
+boosting_results <- train_and_evaluate_boosting(train_data_pca, # specify training data
+                                                validation_data_pca, # specify validation data
+                                                target_column = "Stars", # specify the target column
+                                                control = train_control) # pass the training control parameters
+
+#print the results
+print(boosting_results) # print the performance metrics and model details
+```
+
+During model tuning, different combinations of the number of trees (`n.trees`) and tree depth (`interaction.depth`) were tested. The model with 150 trees and an interaction depth of 3 achieved the best results, minimizing the Root Mean Squared Error (RMSE). Both the shrinkage and n.minobsinnode parameters were held constant during training, with shrinkage set to 0.1 and minimum observations per node set to 10.
+
+The final GBM model achieved:
+
+
+- **MSE:** 0.00124
+
+
+- **RMSE:** 0.0352
+
+
+- **R-squared:** 0.9985
+
+These results indicate very high predictive accuracy, with the model explaining approximately 99.85% of the variance in the ramen ratings.
+The low RMSE value shows that the model’s prediction errors are very small, meaning the model consistently predicts ratings that are close to the actual values.
+
+
+**Final Comparison**
+
+To evaluate and compare the performance of all the models, I compiled the results from kNN, Random Forest, Lasso Regression, and Boosting into a single summary. This allows a clear view of how each model performed using key regression metrics: MSE, RMSE, and R-squared.
+
+
+```{r, echo = FALSE}
+# Ensure all models are trained and results are available
+# (Assumes knn_model_pca, rf_model_pca, and boosting_results$model were previously defined and evaluated)
+
+# Reuse predictions if available or regenerate them
+pred_knn <- predict(knn_model_pca, newdata = validation_data_pca)
+pred_rf <- predict(rf_model_pca, newdata = validation_data_pca)
+
+# Re-train Lasso model here (if lasso_model_pca was not stored)
+lasso_model_pca <- train(
+  Stars ~ .,
+  data = train_data_pca,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 5)
+)
+pred_lasso <- predict(lasso_model_pca, newdata = validation_data_pca)
+
+# Predict from stored boosting model
+pred_boost <- predict(boosting_results$model, newdata = validation_data_pca)
+
+# Actual values
+actual <- validation_data_pca$Stars
+
+# Define function to calculate performance metrics
+calculate_metrics <- function(predictions, actual) {
+  mse <- mean((predictions - actual)^2)
+  rmse <- sqrt(mse)
+  r_squared <- 1 - sum((predictions - actual)^2) / sum((actual - mean(actual))^2)
+  return(list(MSE = mse, RMSE = rmse, R_squared = r_squared))
+}
+
+# Calculate metrics for each model
+knn_metrics <- calculate_metrics(pred_knn, actual)
+rf_metrics <- calculate_metrics(pred_rf, actual)
+lasso_metrics <- calculate_metrics(pred_lasso, actual)
+boosting_metrics <- calculate_metrics(pred_boost, actual)
+
+# Combine results
+comparison <- list(
+  kNN = knn_metrics,
+  Random_Forest = rf_metrics,
+  Lasso = lasso_metrics,
+  Boosting = boosting_metrics
+)
+
+# Print results
+print(comparison)
+```
+
+
+The results above compare the predictive performance of all four models using MSE, RMSE, and R-squared metrics. Among the models tested, Random Forest performed best overall, achieving the lowest MSE (0.0011), lowest RMSE (0.033), and the highest R-squared (0.9987), indicating excellent accuracy and fit.
+
+
+Boosting also performed very well, with metrics nearly as strong as Random Forest. While its RMSE (0.038) and R-squared (0.9982) were slightly behind, Boosting’s sequential learning approach still produced strong predictions.
+
+
+The kNN model performed reasonably well but had slightly higher error, with an RMSE of 0.086 and R-squared of 0.991, while Lasso Regression had the weakest performance in this comparison, with a higher RMSE (0.134) and lower R-squared (0.978).
+
+
+These results show that ensemble tree-based methods like Random Forest and Boosting offered the best balance of low error and high explanatory power for this dataset.
+
+
+## Conclusion
+
+In this analysis, I evaluated several machine learning algorithms to predict ramen ratings, including k-Nearest Neighbors (kNN), Random Forest, Lasso Regression, and Boosting. Each model was assessed using standard regression metrics—Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and R-squared—to determine predictive performance.
+
+
+The **kNN model** performed reasonably well, with an RMSE of 0.086 and R-squared of 0.991, but it was more sensitive to the dataset’s high cardinality and non-normal distributions.
+
+
+The **Random Forest model** delivered the best overall performance, achieving an RMSE of 0.033 and R-squared of 0.999. It excelled at capturing complex interactions and handled the feature space efficiently.
+
+
+**Lasso Regression**, while useful for feature selection, was less effective for this dataset, with a higher RMSE of 0.134 and lower R-squared of 0.978. Its assumption of linearity likely limited its predictive ability.
+
+
+The **Boosting model** (Stochastic Gradient Boosting) also showed strong performance, with an RMSE of 0.038 and R-squared of 0.998. It gradually improved by focusing on harder-to-predict cases, making it highly accurate and robust.
+
+
+Throughout the workflow, challenges such as high-cardinality categorical variables and a non-normal target distribution were addressed using frequency binning, PCA for dimensionality reduction, and Min-Max normalization. These preprocessing steps contributed significantly to improving model accuracy.
+
+
+This project followed the CRISP-DM framework, moving from data understanding and preparation to modeling and evaluation. By comparing multiple models and leveraging their strengths through an ensemble approach, I demonstrated how thoughtful preprocessing and model selection can yield highly accurate predictions.
+
+
+For future work, exploring more advanced ensemble techniques like stacking, or integrating domain-specific features, could further boost performance—especially in datasets with complex patterns and diverse feature types.
+
+
+
+## References and Resources Used
+
+
+- Brownlee, Jason. “How to Use Polynomial Feature Transforms for Machine Learning - MachineLearningMastery.com.” Machine Learning Mastery, 28 August 2020, https://machinelearningmastery.com/polynomial-features-transforms-for-machine-learning/.
+
+
+- Jain, Sandeep. “Boosting in R.” GeeksforGeeks, 11 July 2023, https://www.geeksforgeeks.org/boosting-in-r/.
+
+
+- “Know The Best Evaluation Metrics for Your Regression Model.” Analytics Vidhya, https://www.analyticsvidhya.com/blog/2021/05/know-the-best-evaluation-metrics-for-your-regression-model/.
+
+
+- Lantz, Brett. Machine Learning with R: Expert Techniques for Predictive Modeling. Packt Publishing, 2019.
+
+ 
+- “Ramen Ratings.” Kaggle, https://www.kaggle.com/datasets/residentmario/ramen-ratings.
+
