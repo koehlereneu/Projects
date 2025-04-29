@@ -20,4 +20,4 @@ This project explores different machine learning algorithms to predict ramen rat
 **Files:**
 - `index.html`: Rendered HTML notebook (viewable at the link above)
 - `ramen_rater_v2.Rmd`: Source R Markdown file
-- `README.md`: Project summary
+
